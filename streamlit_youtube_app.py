@@ -101,6 +101,22 @@ class StreamlitYouTubeDownloader:
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
+            # Add headers to bypass 403 errors
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Accept-Encoding': 'gzip,deflate',
+                'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
+                'Connection': 'keep-alive',
+            },
+            # Use cookies if available
+            'cookiefile': None,
+            # Bypass age verification
+            'age_limit': 99,
+            # Use oauth2 if needed
+            'username': None,
+            'password': None,
         }
 
         try:
@@ -259,12 +275,37 @@ class StreamlitYouTubeDownloader:
                     progress = d['downloaded_bytes'] / d['total_bytes_estimate']
                     progress_callback(progress)
 
+        # Base options with 403 bypass measures
+        base_opts = {
+            'outtmpl': str(self.download_path / f'{safe_title}.%(ext)s'),
+            'progress_hooks': [progress_hook],
+            # Anti-403 measures
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Accept-Encoding': 'gzip,deflate',
+                'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
+                'Connection': 'keep-alive',
+            },
+            'cookiefile': None,
+            'age_limit': 99,
+            'sleep_interval': 1,
+            'max_sleep_interval': 5,
+            'sleep_interval_subtitles': 1,
+            # Retry on errors
+            'retries': 3,
+            'fragment_retries': 3,
+            'skip_unavailable_fragments': True,
+            # Use different extractors as fallback
+            'extractor_retries': 3,
+        }
+
         # Configure download options based on format choice
         if format_choice.startswith('bestaudio'):
             ydl_opts = {
-                'format': format_choice,
-                'outtmpl': str(self.download_path / f'{safe_title}.%(ext)s'),
-                'progress_hooks': [progress_hook],
+                **base_opts,
+                'format': 'bestaudio[ext=m4a]/bestaudio/best',
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
@@ -272,11 +313,17 @@ class StreamlitYouTubeDownloader:
                 }],
             }
         else:
+            # Try multiple format strategies
+            format_options = [
+                format_choice,
+                'best[height<=1080][ext=mp4]/best[height<=1080]/best[ext=mp4]/best',
+                'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'best'
+            ]
+
             ydl_opts = {
-                'format': format_choice,
-                'outtmpl': str(self.download_path / f'{safe_title}.%(ext)s'),
-                'progress_hooks': [progress_hook],
-                # Ensure we merge video and audio when needed
+                **base_opts,
+                'format': '/'.join(format_options),
                 'merge_output_format': 'mp4',
             }
 
@@ -318,6 +365,18 @@ class StreamlitYouTubeDownloader:
             else:
                 return None
 
+        except yt_dlp.DownloadError as e:
+            error_msg = str(e)
+            if "403" in error_msg or "Forbidden" in error_msg:
+                st.error("❌ YouTube blocked the download (403 Forbidden)")
+                st.info("💡 Try these solutions:")
+                st.write("1. Wait a few minutes and try again")
+                st.write("2. Try a different video")
+                st.write("3. Use a VPN to change your IP")
+                st.write("4. Update yt-dlp: `pip install --upgrade yt-dlp`")
+            else:
+                st.error(f"Download failed: {error_msg}")
+            return None
         except Exception as e:
             st.error(f"Download failed: {str(e)}")
             return None
