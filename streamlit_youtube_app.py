@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Streamlit YouTube Video Downloader with Trimming
-A web-based YouTube downloader with trimming functionality
+A web-based YouTube downloader with trimming functionality - Fixed for all resolutions
 """
 
 import streamlit as st
@@ -112,64 +112,126 @@ class StreamlitYouTubeDownloader:
             return None
 
     def get_available_formats(self, info):
-        """Extract available video formats and resolutions"""
+        """Extract available video formats and resolutions - IMPROVED VERSION"""
         formats = []
         seen_resolutions = set()
 
         if 'formats' in info:
             for f in info['formats']:
-                if f.get('vcodec') != 'none' and f.get('acodec') != 'none':
+                # Get video formats (including video-only streams)
+                if f.get('vcodec') and f.get('vcodec') != 'none':
                     height = f.get('height')
+                    width = f.get('width')
+
                     if height and height not in seen_resolutions:
+                        # Determine if it's a combined format or video-only
+                        has_audio = f.get('acodec') and f.get('acodec') != 'none'
+                        format_type = "Combined" if has_audio else "Video-only"
+
                         formats.append({
                             'format_id': f['format_id'],
                             'resolution': f"{height}p",
                             'height': height,
+                            'width': width,
                             'ext': f.get('ext', 'mp4'),
                             'filesize': f.get('filesize', 'Unknown'),
                             'fps': f.get('fps', 'Unknown'),
                             'vcodec': f.get('vcodec', 'Unknown'),
-                            'acodec': f.get('acodec', 'Unknown')
+                            'acodec': f.get('acodec', 'Unknown'),
+                            'tbr': f.get('tbr', 0),  # Total bitrate
+                            'vbr': f.get('vbr', 0),  # Video bitrate
+                            'abr': f.get('abr', 0),  # Audio bitrate
+                            'has_audio': has_audio,
+                            'format_type': format_type,
+                            'format_note': f.get('format_note', ''),
+                            'quality': f.get('quality', 0)
                         })
                         seen_resolutions.add(height)
 
-        # Sort by resolution (highest first)
-        formats.sort(key=lambda x: x['height'], reverse=True)
+        # Sort by resolution (highest first), then by quality/bitrate
+        formats.sort(key=lambda x: (x['height'], x['tbr'] or 0, x['vbr'] or 0), reverse=True)
+
+        # Debug: Print available formats to console
+        st.write("**Available formats found:**")
+        for fmt in formats:
+            st.write(f"- {fmt['resolution']} ({fmt['format_type']}) - {fmt['vcodec']} - {fmt['format_note']}")
+
         return formats
 
     def create_download_options(self, formats):
-        """Create download options for selectbox"""
+        """Create download options for selectbox - IMPROVED"""
         options = []
 
-        # Add highest quality option first
-        if formats:
-            highest = formats[0]
-            options.append(f"🎯 Highest Quality ({highest['resolution']}) - {highest['ext']}")
+        # Group formats by resolution
+        resolution_groups = {}
+        for fmt in formats:
+            res = fmt['resolution']
+            if res not in resolution_groups:
+                resolution_groups[res] = []
+            resolution_groups[res].append(fmt)
 
-        # Add all format options
-        for i, fmt in enumerate(formats):
-            size_str = self.format_filesize(fmt['filesize'])
-            fps_str = f"{fmt['fps']}fps" if fmt['fps'] != 'Unknown' else 'N/A'
-            options.append(f"{fmt['resolution']} ({fmt['ext']}) - {size_str} - {fps_str}")
+        # Add best overall quality option
+        if formats:
+            best_format = formats[0]
+            options.append(f"🎯 Best Quality ({best_format['resolution']}) - Auto Select")
+
+        # Add resolution options with format details
+        for resolution in sorted(resolution_groups.keys(), key=lambda x: int(x[:-1]), reverse=True):
+            res_formats = resolution_groups[resolution]
+
+            # Find best format for this resolution
+            best_for_res = max(res_formats, key=lambda x: (x['has_audio'], x['tbr'] or 0, x['vbr'] or 0))
+
+            size_str = self.format_filesize(best_for_res['filesize'])
+            fps_str = f"{best_for_res['fps']}fps" if best_for_res['fps'] != 'Unknown' else ''
+            type_str = "📹+🔊" if best_for_res['has_audio'] else "📹"
+
+            option_text = f"{type_str} {resolution} ({best_for_res['ext']}) - {size_str}"
+            if fps_str:
+                option_text += f" - {fps_str}"
+
+            options.append(option_text)
 
         # Add audio only option
-        options.append("🎵 Audio Only (MP3)")
+        options.append("🎵 Audio Only (MP3) - Best Quality")
 
         return options
 
     def get_format_from_selection(self, selection, formats):
-        """Get format_id from user selection"""
-        if selection.startswith("🎯 Highest Quality"):
-            return formats[0]['format_id'] if formats else None
+        """Get format_id from user selection - IMPROVED"""
+        if selection.startswith("🎯 Best Quality"):
+            # Return format that will give best quality (yt-dlp will merge if needed)
+            return "best[height<=?1080]/best"  # Prefer up to 1080p, fallback to best available
         elif selection.startswith("🎵 Audio Only"):
-            return 'audio'
+            return "bestaudio/best"
         else:
-            # Parse resolution from selection
-            resolution = selection.split('(')[0].strip()
-            for fmt in formats:
-                if fmt['resolution'] == resolution:
-                    return fmt['format_id']
-        return None
+            # Extract resolution from selection
+            try:
+                # Parse resolution (e.g., "1080p" from "📹+🔊 1080p (mp4) - 125.5 MB")
+                parts = selection.split(' ')
+                for part in parts:
+                    if part.endswith('p'):
+                        target_resolution = part
+                        target_height = int(target_resolution[:-1])
+
+                        # Find best format for this resolution
+                        matching_formats = [f for f in formats if f['height'] == target_height]
+                        if matching_formats:
+                            # Prefer combined formats, then highest bitrate
+                            best_match = max(matching_formats,
+                                             key=lambda x: (x['has_audio'], x['tbr'] or 0, x['vbr'] or 0))
+
+                            # If it's video-only, use yt-dlp format selector to merge with audio
+                            if not best_match['has_audio']:
+                                return f"best[height<={target_height}]/best"
+                            else:
+                                return best_match['format_id']
+                        break
+            except (ValueError, IndexError):
+                pass
+
+        # Fallback to best quality
+        return "best[height<=?1080]/best"
 
     def download_video(self, url, format_choice, title, start_time=None, end_time=None, progress_callback=None):
         """Download video with selected format and optional trimming"""
@@ -197,9 +259,10 @@ class StreamlitYouTubeDownloader:
                     progress = d['downloaded_bytes'] / d['total_bytes_estimate']
                     progress_callback(progress)
 
-        if format_choice == 'audio':
+        # Configure download options based on format choice
+        if format_choice.startswith('bestaudio'):
             ydl_opts = {
-                'format': 'bestaudio/best',
+                'format': format_choice,
                 'outtmpl': str(self.download_path / f'{safe_title}.%(ext)s'),
                 'progress_hooks': [progress_hook],
                 'postprocessors': [{
@@ -213,6 +276,8 @@ class StreamlitYouTubeDownloader:
                 'format': format_choice,
                 'outtmpl': str(self.download_path / f'{safe_title}.%(ext)s'),
                 'progress_hooks': [progress_hook],
+                # Ensure we merge video and audio when needed
+                'merge_output_format': 'mp4',
             }
 
         # Add trimming options if specified
@@ -228,6 +293,15 @@ class StreamlitYouTubeDownloader:
                     postprocessor_args.extend(['-t', str(duration)])
                 else:
                     postprocessor_args.extend(['-to', str(end_time)])
+
+            # Add FFmpeg postprocessor for trimming
+            if 'postprocessors' not in ydl_opts:
+                ydl_opts['postprocessors'] = []
+
+            ydl_opts['postprocessors'].append({
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            })
 
             ydl_opts['postprocessor_args'] = {
                 'ffmpeg': postprocessor_args
@@ -339,18 +413,12 @@ class StreamlitYouTubeDownloader:
                 )
 
                 # Show format details
-                if selected_format.startswith("🎯 Highest Quality"):
-                    fmt = st.session_state.formats[0]
-                    st.info(f"📊 **{fmt['resolution']}** | {fmt['ext']} | {self.format_filesize(fmt['filesize'])}")
-                elif not selected_format.startswith("🎵 Audio Only"):
-                    resolution = selected_format.split('(')[0].strip()
-                    for fmt in st.session_state.formats:
-                        if fmt['resolution'] == resolution:
-                            st.info(
-                                f"📊 **{fmt['resolution']}** | {fmt['ext']} | {self.format_filesize(fmt['filesize'])}")
-                            break
-                else:
+                if selected_format.startswith("🎯"):
+                    st.info("🎯 **Best Available Quality** - Automatically selects the highest quality format")
+                elif selected_format.startswith("🎵"):
                     st.info("🎵 **Audio Only** | MP3 | ~3-5MB per minute")
+                else:
+                    st.info(f"📺 Selected: **{selected_format}**")
 
             with col2:
                 st.subheader("✂️ Trimming Options")
@@ -460,7 +528,7 @@ class StreamlitYouTubeDownloader:
                                     label="📥 Download File",
                                     data=file.read(),
                                     file_name=downloaded_file.name,
-                                    mime="video/mp4" if format_id != 'audio' else "audio/mpeg",
+                                    mime="video/mp4" if not format_id.startswith('bestaudio') else "audio/mpeg",
                                     use_container_width=True
                                 )
 
